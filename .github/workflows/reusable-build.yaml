@@ -1,0 +1,87 @@
+name: Reusable Build and Push
+
+on:
+  workflow_call:
+    inputs:
+      image_name:
+        required: true
+        type: string
+      context_path:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+            platform: linux/amd64
+          - arch: arm64
+            runner: ubuntu-24.04-arm # Native ARM64 GitHub Runner
+            platform: linux/arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Downcase owner name
+        run: |
+          echo "OWNER_LOWER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and Push Single-Arch Image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.context_path }}
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: ghcr.io/${{ env.OWNER_LOWER }}/${{ inputs.image_name }}:sha-${{ github.sha }}-${{ matrix.arch }}
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=${{ inputs.image_name }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ inputs.image_name }}-${{ matrix.arch }}
+
+  promote:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create and Push Multi-Arch Manifest
+        run: |
+          OWNER_LOWER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          TAG_LATEST="ghcr.io/${OWNER_LOWER}/${{ inputs.image_name }}:latest"
+          TAG_SHA="ghcr.io/${OWNER_LOWER}/${{ inputs.image_name }}:sha-${{ github.sha }}"
+          
+          # Create and push manifest for commit SHA
+          docker manifest create --amend $TAG_SHA \
+            ghcr.io/${OWNER_LOWER}/${{ inputs.image_name }}:sha-${{ github.sha }}-amd64 \
+            ghcr.io/${OWNER_LOWER}/${{ inputs.image_name }}:sha-${{ github.sha }}-arm64
+          docker manifest push $TAG_SHA
+          
+          # Create and push manifest for latest
+          docker manifest create --amend $TAG_LATEST \
+            ghcr.io/${OWNER_LOWER}/${{ inputs.image_name }}:sha-${{ github.sha }}-amd64 \
+            ghcr.io/${OWNER_LOWER}/${{ inputs.image_name }}:sha-${{ github.sha }}-arm64
+          docker manifest push $TAG_LATEST
