@@ -13,6 +13,11 @@
       "description": "Group all plezy-relay updates (Go modules and Docker base image) together",
       "matchPaths": ["plezy-relay/**"],
       "groupName": "Plezy Relay Dependencies"
+    },
+    {
+      "description": "Group all GitHub Actions workflow updates together",
+      "matchManagers": ["github-actions"],
+      "groupName": "GitHub Actions Dependencies"
     }
   ]
 }
