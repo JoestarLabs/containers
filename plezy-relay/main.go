@@ -1,10 +1,6 @@
-// Originally from https://github.com/edde746/plezy/tree/main/server (GPL-3.0)
-// 2026-04-24
-
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -19,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -28,26 +25,28 @@ import (
 )
 
 const (
-	maxRoomSize       = 8
-	rateBurst         = 30
-	rateSustained     = 10
-	cleanupInterval   = 5 * time.Minute
-	emptyRoomMaxAge   = 5 * time.Minute
-	roomMaxAge        = 24 * time.Hour
-	writeWait         = 10 * time.Second
-	pongWait          = 60 * time.Second
-	pingInterval      = 30 * time.Second
-	maxMessageSize    = 64 * 1024
-	maxLogSize        = 1 * 1024 * 1024 // 1MB
-	logMaxAge         = 3 * 24 * time.Hour
-	logIDLength       = 5
-	logRateInterval   = 1 * time.Minute
-	maxLogEntries     = 500
-	maxConnsPerIP     = 5
-	maxGlobalConns    = 100
-	maxRoomsPerIP     = 3
-	connRateBurst     = 5
-	connRateSustained = 1
+	rateBurst          = 30
+	rateSustained      = 10
+	cleanupInterval    = 5 * time.Minute
+	emptyRoomMaxAge    = 5 * time.Minute
+	roomMaxAge         = 24 * time.Hour
+	writeWait          = 10 * time.Second
+	pongWait           = 60 * time.Second
+	pingInterval       = 30 * time.Second
+	maxLogSize         = 1 * 1024 * 1024 // 1MB
+	logMaxAge          = 3 * 24 * time.Hour
+	logIDLength        = 5
+	logRateInterval    = 1 * time.Minute
+	maxLogEntries      = 500
+	maxPosterSize      = 5 * 1024 * 1024 // 5MB
+	maxPosterStoreSize = int64(1 * 1024 * 1024 * 1024)
+	posterMaxAge       = 3 * time.Hour
+	posterIDLength     = 16
+	maxConnsPerIP      = 5
+	maxGlobalConns     = 100
+	maxRoomsPerIP      = 3
+	connRateBurst      = 5
+	connRateSustained  = 1
 
 	snapshotFormatVersion = 1
 	snapshotDebounce      = 100 * time.Millisecond
@@ -59,142 +58,6 @@ var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
 	CheckOrigin:     func(r *http.Request) bool { return true },
-}
-
-// --- Rate limiter (token bucket) ---
-
-type rateLimiter struct {
-	tokens     float64
-	maxTokens  float64
-	refillRate float64
-	lastTime   time.Time
-	mu         sync.Mutex
-}
-
-func newRateLimiter(burst, sustained int) *rateLimiter {
-	return &rateLimiter{
-		tokens:     float64(burst),
-		maxTokens:  float64(burst),
-		refillRate: float64(sustained),
-		lastTime:   time.Now(),
-	}
-}
-
-func (rl *rateLimiter) allow() bool {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-
-	now := time.Now()
-	elapsed := now.Sub(rl.lastTime).Seconds()
-	rl.lastTime = now
-
-	rl.tokens += elapsed * rl.refillRate
-	if rl.tokens > rl.maxTokens {
-		rl.tokens = rl.maxTokens
-	}
-
-	if rl.tokens < 1 {
-		return false
-	}
-	rl.tokens--
-	return true
-}
-
-// stale reports whether a limiter hasn't been touched in over 10 minutes —
-// safe to GC from a per-IP map.
-func (rl *rateLimiter) stale(now time.Time) bool {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	return now.Sub(rl.lastTime) > 10*time.Minute
-}
-
-// --- Connection tracker (per-IP limits) ---
-
-type connTracker struct {
-	mu          sync.Mutex
-	perIP       map[string]int
-	ipRate      map[string]*rateLimiter
-	roomsPerIP  map[string]int
-	globalCount int
-}
-
-func newConnTracker() *connTracker {
-	return &connTracker{
-		perIP:      make(map[string]int),
-		ipRate:     make(map[string]*rateLimiter),
-		roomsPerIP: make(map[string]int),
-	}
-}
-
-func (ct *connTracker) tryConnect(ip string) bool {
-	ct.mu.Lock()
-	defer ct.mu.Unlock()
-
-	if ct.globalCount >= maxGlobalConns {
-		return false
-	}
-	if ct.perIP[ip] >= maxConnsPerIP {
-		return false
-	}
-
-	rl, ok := ct.ipRate[ip]
-	if !ok {
-		rl = newRateLimiter(connRateBurst, connRateSustained)
-		ct.ipRate[ip] = rl
-	}
-	// Unlock ct.mu before calling rl.allow() would be cleaner,
-	// but since rl has its own mutex this is safe (no deadlock).
-	if !rl.allow() {
-		return false
-	}
-
-	ct.perIP[ip]++
-	ct.globalCount++
-	return true
-}
-
-func (ct *connTracker) disconnect(ip string) {
-	ct.mu.Lock()
-	defer ct.mu.Unlock()
-
-	if ct.perIP[ip] > 0 {
-		ct.perIP[ip]--
-		ct.globalCount--
-	}
-	if ct.perIP[ip] == 0 {
-		delete(ct.perIP, ip)
-	}
-}
-
-func (ct *connTracker) tryCreateRoom(ip string) bool {
-	ct.mu.Lock()
-	defer ct.mu.Unlock()
-	if ct.roomsPerIP[ip] >= maxRoomsPerIP {
-		return false
-	}
-	ct.roomsPerIP[ip]++
-	return true
-}
-
-func (ct *connTracker) releaseRoom(ip string) {
-	ct.mu.Lock()
-	defer ct.mu.Unlock()
-	if ct.roomsPerIP[ip] > 0 {
-		ct.roomsPerIP[ip]--
-	}
-	if ct.roomsPerIP[ip] == 0 {
-		delete(ct.roomsPerIP, ip)
-	}
-}
-
-func (ct *connTracker) cleanup() {
-	ct.mu.Lock()
-	defer ct.mu.Unlock()
-	for ip := range ct.ipRate {
-		if ct.perIP[ip] == 0 {
-			delete(ct.ipRate, ip)
-		}
-	}
 }
 
 // --- Messages ---
@@ -221,9 +84,10 @@ type serverMsg struct {
 // --- Client (serializes writes to a single goroutine) ---
 
 type Client struct {
-	conn *websocket.Conn
-	send chan []byte
-	done chan struct{}
+	conn      *websocket.Conn
+	send      chan []byte
+	done      chan struct{}
+	closeOnce sync.Once
 }
 
 func newClient(conn *websocket.Conn) *Client {
@@ -269,7 +133,10 @@ func (c *Client) sendJSON(msg serverMsg) {
 }
 
 func (c *Client) close() {
-	close(c.done)
+	c.closeOnce.Do(func() {
+		close(c.done)
+		_ = c.conn.Close()
+	})
 }
 
 // --- Room ---
@@ -311,15 +178,16 @@ func (r *Room) broadcastExcept(senderID string, msg serverMsg) {
 	if err != nil {
 		return
 	}
-	// Copy peers under lock, then send without holding it
-	r.mu.RLock()
+	// Copy peers and record activity under lock, then send without holding it.
+	r.mu.Lock()
 	targets := make([]*Client, 0, len(r.Peers))
+	r.LastActivityAt = time.Now()
 	for id, client := range r.Peers {
 		if id != senderID {
 			targets = append(targets, client)
 		}
 	}
-	r.mu.RUnlock()
+	r.mu.Unlock()
 
 	for _, client := range targets {
 		client.trySend(data)
@@ -331,9 +199,12 @@ func (r *Room) sendTo(targetID string, msg serverMsg) bool {
 	if err != nil {
 		return false
 	}
-	r.mu.RLock()
+	r.mu.Lock()
 	client, ok := r.Peers[targetID]
-	r.mu.RUnlock()
+	if ok {
+		r.LastActivityAt = time.Now()
+	}
+	r.mu.Unlock()
 	if !ok {
 		return false
 	}
@@ -345,14 +216,18 @@ func (r *Room) sendTo(targetID string, msg serverMsg) bool {
 
 type logEntry struct {
 	Size      int
+	CreatedAt time.Time
 	ExpiresAt time.Time
 }
 
+var errLogStoreFull = errors.New("log store full")
+
 type logStore struct {
-	entries   map[string]logEntry
-	rateLimit map[string]time.Time // IP -> last upload time
-	dir       string
-	mu        sync.RWMutex
+	entries    map[string]logEntry
+	rateLimit  map[string]time.Time // IP -> last upload time
+	dir        string
+	generateID func() string
+	mu         sync.RWMutex
 }
 
 func newLogStore(dir string) *logStore {
@@ -360,15 +235,12 @@ func newLogStore(dir string) *logStore {
 		log.Fatalf("failed to create log dir %s: %v", dir, err)
 	}
 	ls := &logStore{
-		entries:   make(map[string]logEntry),
-		rateLimit: make(map[string]time.Time),
-		dir:       dir,
+		entries:    make(map[string]logEntry),
+		rateLimit:  make(map[string]time.Time),
+		dir:        dir,
+		generateID: generateLogID,
 	}
-	// Clean orphaned files from prior runs
-	files, _ := os.ReadDir(dir)
-	for _, f := range files {
-		os.Remove(filepath.Join(dir, f.Name()))
-	}
+	ls.loadExisting(time.Now())
 	return ls
 }
 
@@ -376,31 +248,431 @@ func (ls *logStore) filePath(id string) string {
 	return filepath.Join(ls.dir, id+".log")
 }
 
-const logIDChars = "abcdefghijklmnopqrstuvwxyz0123456789"
+const idChars = "abcdefghijklmnopqrstuvwxyz0123456789"
 
-func generateLogID() string {
-	b := make([]byte, logIDLength)
+func generateID(length int) string {
+	b := make([]byte, length)
 	for i := range b {
-		n, _ := rand.Int(rand.Reader, big.NewInt(int64(len(logIDChars))))
-		b[i] = logIDChars[n.Int64()]
+		n, _ := rand.Int(rand.Reader, big.NewInt(int64(len(idChars))))
+		b[i] = idChars[n.Int64()]
 	}
 	return string(b)
+}
+
+func generateLogID() string {
+	return generateID(logIDLength)
+}
+
+func logIDFromFilename(filename string) (string, bool) {
+	if filepath.Ext(filename) != ".log" {
+		return "", false
+	}
+	id := strings.TrimSuffix(filename, ".log")
+	return id, validID(id, logIDLength)
+}
+
+func (ls *logStore) loadExisting(now time.Time) {
+	ls.mu.Lock()
+	defer ls.mu.Unlock()
+
+	files, err := os.ReadDir(ls.dir)
+	if err != nil {
+		log.Printf("logs: failed to read dir %s: %v", ls.dir, err)
+		return
+	}
+	for _, file := range files {
+		filename := file.Name()
+		path := filepath.Join(ls.dir, filename)
+		if file.IsDir() || strings.HasSuffix(filename, ".tmp") {
+			os.RemoveAll(path)
+			continue
+		}
+		id, ok := logIDFromFilename(filename)
+		if !ok {
+			os.Remove(path)
+			continue
+		}
+		info, err := file.Info()
+		if err != nil || info.Size() <= 0 || info.Size() > maxLogSize {
+			os.Remove(path)
+			continue
+		}
+		createdAt := info.ModTime()
+		expiresAt := createdAt.Add(logMaxAge)
+		if !now.Before(expiresAt) {
+			os.Remove(path)
+			continue
+		}
+		ls.entries[id] = logEntry{
+			Size:      int(info.Size()),
+			CreatedAt: createdAt,
+			ExpiresAt: expiresAt,
+		}
+	}
+	ls.evictOldestLocked(maxLogEntries)
+}
+
+func (ls *logStore) store(data []byte, now time.Time) (string, logEntry, error) {
+	if len(data) == 0 {
+		return "", logEntry{}, errors.New("empty log")
+	}
+	if len(data) > maxLogSize {
+		return "", logEntry{}, errors.New("log too large")
+	}
+
+	ls.mu.Lock()
+	defer ls.mu.Unlock()
+	ls.cleanupExpiredLocked(now)
+	if len(ls.entries) >= maxLogEntries {
+		return "", logEntry{}, errLogStoreFull
+	}
+
+	id := ls.generateID()
+	for {
+		if _, exists := ls.entries[id]; !exists {
+			if _, err := os.Stat(ls.filePath(id)); errors.Is(err, fs.ErrNotExist) {
+				break
+			}
+		}
+		id = ls.generateID()
+	}
+
+	path := ls.filePath(id)
+	tmpPath := path + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+		os.Remove(tmpPath)
+		return "", logEntry{}, err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath)
+		return "", logEntry{}, err
+	}
+	_ = os.Chtimes(path, now, now)
+
+	entry := logEntry{
+		Size:      len(data),
+		CreatedAt: now,
+		ExpiresAt: now.Add(logMaxAge),
+	}
+	ls.entries[id] = entry
+	return id, entry, nil
+}
+
+func (ls *logStore) lookup(id string, now time.Time) (logEntry, bool) {
+	if !validID(id, logIDLength) {
+		return logEntry{}, false
+	}
+	ls.mu.Lock()
+	defer ls.mu.Unlock()
+	entry, ok := ls.entries[id]
+	if !ok {
+		return logEntry{}, false
+	}
+	if !now.Before(entry.ExpiresAt) {
+		ls.deleteEntryLocked(id)
+		return logEntry{}, false
+	}
+	return entry, true
+}
+
+func (ls *logStore) cleanupExpiredLocked(now time.Time) {
+	for id, entry := range ls.entries {
+		if !now.Before(entry.ExpiresAt) {
+			ls.deleteEntryLocked(id)
+		}
+	}
+}
+
+func (ls *logStore) evictOldestLocked(limit int) {
+	for len(ls.entries) > limit {
+		var oldestID string
+		var oldest logEntry
+		for id, entry := range ls.entries {
+			if oldestID == "" || entry.CreatedAt.Before(oldest.CreatedAt) {
+				oldestID = id
+				oldest = entry
+			}
+		}
+		if oldestID == "" {
+			return
+		}
+		ls.deleteEntryLocked(oldestID)
+	}
+}
+
+func (ls *logStore) deleteEntryLocked(id string) {
+	os.Remove(ls.filePath(id))
+	delete(ls.entries, id)
 }
 
 func (ls *logStore) cleanup() {
 	ls.mu.Lock()
 	defer ls.mu.Unlock()
 	now := time.Now()
-	for id, entry := range ls.entries {
-		if now.After(entry.ExpiresAt) {
-			os.Remove(ls.filePath(id))
-			delete(ls.entries, id)
+	ls.cleanupExpiredLocked(now)
+	cleanupRateWindows(ls.rateLimit, now, logRateInterval)
+}
+
+// --- Poster store ---
+
+type posterEntry struct {
+	Filename    string
+	Size        int64
+	ContentType string
+	CreatedAt   time.Time
+	ExpiresAt   time.Time
+}
+
+type posterStore struct {
+	entries    map[string]posterEntry
+	dir        string
+	maxBytes   int64
+	maxAge     time.Duration
+	totalBytes int64
+	mu         sync.RWMutex
+}
+
+func newPosterStore(dir string, maxBytes int64, maxAge time.Duration) *posterStore {
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		log.Fatalf("failed to create poster dir %s: %v", dir, err)
+	}
+	ps := &posterStore{
+		entries:  make(map[string]posterEntry),
+		dir:      dir,
+		maxBytes: maxBytes,
+		maxAge:   maxAge,
+	}
+	ps.loadExisting(time.Now())
+	return ps
+}
+
+func (ps *posterStore) filePath(filename string) string {
+	return filepath.Join(ps.dir, filename)
+}
+
+func generatePosterID() string {
+	return generateID(posterIDLength)
+}
+
+func posterExtForContentType(contentType string) (string, bool) {
+	switch strings.ToLower(strings.SplitN(contentType, ";", 2)[0]) {
+	case "image/jpeg":
+		return ".jpg", true
+	case "image/png":
+		return ".png", true
+	case "image/gif":
+		return ".gif", true
+	case "image/webp":
+		return ".webp", true
+	default:
+		return "", false
+	}
+}
+
+func posterContentTypeForExt(ext string) (string, bool) {
+	switch strings.ToLower(ext) {
+	case ".jpg", ".jpeg":
+		return "image/jpeg", true
+	case ".png":
+		return "image/png", true
+	case ".gif":
+		return "image/gif", true
+	case ".webp":
+		return "image/webp", true
+	default:
+		return "", false
+	}
+}
+
+func validID(id string, length int) bool {
+	if len(id) != length {
+		return false
+	}
+	for _, ch := range id {
+		if !strings.ContainsRune(idChars, ch) {
+			return false
 		}
 	}
-	for ip, lastTime := range ls.rateLimit {
-		if now.Sub(lastTime) > logRateInterval {
-			delete(ls.rateLimit, ip)
+	return true
+}
+
+func posterIDFromFilename(filename string) (string, bool) {
+	if filename == "" || strings.ContainsAny(filename, `/\\`) {
+		return "", false
+	}
+	ext := filepath.Ext(filename)
+	if _, ok := posterContentTypeForExt(ext); !ok {
+		return "", false
+	}
+	id := strings.TrimSuffix(filename, ext)
+	if !validID(id, posterIDLength) {
+		return "", false
+	}
+	return id, true
+}
+
+func (ps *posterStore) loadExisting(now time.Time) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+
+	files, err := os.ReadDir(ps.dir)
+	if err != nil {
+		log.Printf("posters: failed to read dir %s: %v", ps.dir, err)
+		return
+	}
+	for _, f := range files {
+		filename := f.Name()
+		path := ps.filePath(filename)
+		if f.IsDir() || strings.HasSuffix(filename, ".tmp") {
+			os.RemoveAll(path)
+			continue
 		}
+		id, ok := posterIDFromFilename(filename)
+		if !ok {
+			os.Remove(path)
+			continue
+		}
+		info, err := f.Info()
+		if err != nil {
+			os.Remove(path)
+			continue
+		}
+		createdAt := info.ModTime()
+		expiresAt := createdAt.Add(ps.maxAge)
+		if !now.Before(expiresAt) {
+			os.Remove(path)
+			continue
+		}
+		contentType, _ := posterContentTypeForExt(filepath.Ext(filename))
+		entry := posterEntry{
+			Filename:    filename,
+			Size:        info.Size(),
+			ContentType: contentType,
+			CreatedAt:   createdAt,
+			ExpiresAt:   expiresAt,
+		}
+		ps.entries[id] = entry
+		ps.totalBytes += entry.Size
+	}
+	ps.evictOldestLocked(0)
+}
+
+func (ps *posterStore) store(data []byte, contentType string, now time.Time) (string, posterEntry, error) {
+	entrySize := int64(len(data))
+	if entrySize <= 0 {
+		return "", posterEntry{}, errors.New("empty poster")
+	}
+	if entrySize > ps.maxBytes {
+		return "", posterEntry{}, errors.New("poster exceeds store size")
+	}
+	ext, ok := posterExtForContentType(contentType)
+	if !ok {
+		return "", posterEntry{}, errors.New("unsupported poster type")
+	}
+
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+
+	ps.cleanupExpiredLocked(now)
+	ps.evictOldestLocked(entrySize)
+	if ps.totalBytes+entrySize > ps.maxBytes {
+		return "", posterEntry{}, errors.New("poster store full")
+	}
+
+	id := generatePosterID()
+	for {
+		if _, exists := ps.entries[id]; !exists {
+			if _, err := os.Stat(ps.filePath(id + ext)); errors.Is(err, fs.ErrNotExist) {
+				break
+			}
+		}
+		id = generatePosterID()
+	}
+
+	filename := id + ext
+	path := ps.filePath(filename)
+	tmpPath := path + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+		os.Remove(tmpPath)
+		return "", posterEntry{}, err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath)
+		return "", posterEntry{}, err
+	}
+	_ = os.Chtimes(path, now, now)
+
+	entry := posterEntry{
+		Filename:    filename,
+		Size:        entrySize,
+		ContentType: strings.ToLower(strings.SplitN(contentType, ";", 2)[0]),
+		CreatedAt:   now,
+		ExpiresAt:   now.Add(ps.maxAge),
+	}
+	ps.entries[id] = entry
+	ps.totalBytes += entry.Size
+	return id, entry, nil
+}
+
+func (ps *posterStore) lookup(filename string, now time.Time) (posterEntry, bool) {
+	id, ok := posterIDFromFilename(filename)
+	if !ok {
+		return posterEntry{}, false
+	}
+
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	entry, ok := ps.entries[id]
+	if !ok || entry.Filename != filename {
+		return posterEntry{}, false
+	}
+	if !now.Before(entry.ExpiresAt) {
+		ps.deleteEntryLocked(id, entry)
+		return posterEntry{}, false
+	}
+	return entry, true
+}
+
+func (ps *posterStore) cleanup(now time.Time) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	ps.cleanupExpiredLocked(now)
+	ps.evictOldestLocked(0)
+}
+
+func (ps *posterStore) cleanupExpiredLocked(now time.Time) {
+	for id, entry := range ps.entries {
+		if !now.Before(entry.ExpiresAt) {
+			ps.deleteEntryLocked(id, entry)
+		}
+	}
+}
+
+func (ps *posterStore) evictOldestLocked(extraBytes int64) {
+	for ps.totalBytes+extraBytes > ps.maxBytes && len(ps.entries) > 0 {
+		var oldestID string
+		var oldest posterEntry
+		first := true
+		for id, entry := range ps.entries {
+			if first || entry.CreatedAt.Before(oldest.CreatedAt) {
+				oldestID = id
+				oldest = entry
+				first = false
+			}
+		}
+		if oldestID == "" {
+			return
+		}
+		ps.deleteEntryLocked(oldestID, oldest)
+	}
+}
+
+func (ps *posterStore) deleteEntryLocked(id string, entry posterEntry) {
+	os.Remove(ps.filePath(entry.Filename))
+	delete(ps.entries, id)
+	ps.totalBytes -= entry.Size
+	if ps.totalBytes < 0 {
+		ps.totalBytes = 0
 	}
 }
 
@@ -554,16 +826,22 @@ func (sn *snapshotter) logWriteErr(err error) {
 // --- Server ---
 
 type Server struct {
-	rooms map[string]*Room
-	logs  *logStore
-	conns *connTracker
-	snap  *snapshotter
-	oauth *oauthProxy // nil when OAUTH_BASE_URL is unset
-	mu    sync.RWMutex
+	rooms   map[string]*Room
+	logs    *logStore
+	posters *posterStore
+	conns   *connTracker
+	snap    *snapshotter
+	oauth   *oauthProxy // nil when OAUTH_BASE_URL is unset
+	mu      sync.RWMutex
 }
 
-func newServer(logDir, stateFile string) *Server {
-	s := &Server{rooms: make(map[string]*Room), logs: newLogStore(logDir), conns: newConnTracker()}
+func newServer(logDir, stateFile, posterDir string) *Server {
+	s := &Server{
+		rooms:   make(map[string]*Room),
+		logs:    newLogStore(logDir),
+		posters: newPosterStore(posterDir, maxPosterStoreSize, posterMaxAge),
+		conns:   newConnTracker(),
+	}
 	if p, ok := oauthConfigFromEnv(); ok {
 		s.oauth = p
 		log.Printf("oauth: proxy enabled (base=%s, services=%d)", p.baseURL, len(p.services))
@@ -629,7 +907,7 @@ func (s *Server) loadSnapshot(path string) error {
 	loaded, skipped := 0, 0
 	s.mu.Lock()
 	for _, r := range snap.Rooms {
-		if r.SessionID == "" || r.HostPeerID == "" {
+		if !validRelayID(r.SessionID, maxSessionIDLength) || !validRelayID(r.HostPeerID, maxPeerIDLength) {
 			skipped++
 			continue
 		}
@@ -666,32 +944,45 @@ func (s *Server) cleanupLoop() {
 func (s *Server) runCleanupStep(now time.Time) {
 	s.mu.Lock()
 	changed := false
+	var expiredClients []*Client
 	for id, room := range s.rooms {
 		room.mu.RLock()
 		empty := len(room.Peers) == 0
 		age := now.Sub(room.CreatedAt)
 		idle := now.Sub(room.LastActivityAt)
+		expired := age > roomMaxAge
+		if expired && !empty {
+			for _, client := range room.Peers {
+				expiredClients = append(expiredClients, client)
+			}
+		}
 		room.mu.RUnlock()
 
-		if (empty && idle > emptyRoomMaxAge) || age > roomMaxAge {
+		if (empty && idle > emptyRoomMaxAge) || expired {
 			log.Printf("cleanup: removing room %s (empty=%v, idle=%v, age=%v)", id, empty, idle, age)
 			delete(s.rooms, id)
 			changed = true
 		}
 	}
+	roomCount := len(s.rooms)
 	s.mu.Unlock()
+
+	for _, client := range expiredClients {
+		client.close()
+	}
 	if changed {
 		s.snap.schedule()
 	}
 	s.logs.cleanup()
-	s.conns.cleanup()
+	s.posters.cleanup(now)
+	s.conns.cleanup(now)
 	if s.oauth != nil {
 		s.oauth.cleanup()
 	}
 
 	s.conns.mu.Lock()
 	log.Printf("stats: conns=%d ips=%d rooms=%d",
-		s.conns.globalCount, len(s.conns.perIP), len(s.rooms))
+		s.conns.globalCount, len(s.conns.perIP), roomCount)
 	s.conns.mu.Unlock()
 }
 
@@ -746,29 +1037,18 @@ func (s *Server) handlePostLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.logs.mu.Lock()
-	if len(s.logs.entries) >= maxLogEntries {
-		s.logs.mu.Unlock()
-		http.Error(w, "Log store full", http.StatusServiceUnavailable)
-		return
-	}
-	s.logs.mu.Unlock()
-
-	id := generateLogID()
-	if err := os.WriteFile(s.logs.filePath(id), body, 0644); err != nil {
-		log.Printf("logs: failed to write %s: %v", id, err)
+	id, entry, err := s.logs.store(body, time.Now())
+	if err != nil {
+		if errors.Is(err, errLogStoreFull) {
+			http.Error(w, "Log store full", http.StatusServiceUnavailable)
+			return
+		}
+		log.Printf("logs: failed to store from %s: %v", ip, err)
 		http.Error(w, "Failed to store log", http.StatusInternalServerError)
 		return
 	}
 
-	s.logs.mu.Lock()
-	s.logs.entries[id] = logEntry{
-		Size:      len(body),
-		ExpiresAt: time.Now().Add(logMaxAge),
-	}
-	s.logs.mu.Unlock()
-
-	log.Printf("logs: stored %s (%d bytes) from %s", id, len(body), ip)
+	log.Printf("logs: stored %s (%d bytes) from %s", id, entry.Size, ip)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"id": id})
@@ -786,11 +1066,8 @@ func (s *Server) handleGetLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.logs.mu.RLock()
-	entry, ok := s.logs.entries[id]
-	s.logs.mu.RUnlock()
-
-	if !ok || time.Now().After(entry.ExpiresAt) {
+	entry, ok := s.logs.lookup(id, time.Now())
+	if !ok {
 		http.Error(w, "Not found", http.StatusNotFound)
 		return
 	}
@@ -801,10 +1078,84 @@ func (s *Server) handleGetLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	http.ServeContent(w, r, "log.txt", time.Time{}, bytes.NewReader(data))
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Content-Length", strconv.Itoa(entry.Size))
+	w.Write(data)
 }
 
+func (s *Server) handlePostPosters(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxPosterSize+1))
+	if err != nil {
+		http.Error(w, "Failed to read body", http.StatusBadRequest)
+		return
+	}
+	if len(body) > maxPosterSize {
+		http.Error(w, "Poster too large (max 5MB)", http.StatusRequestEntityTooLarge)
+		return
+	}
+	if len(body) == 0 {
+		http.Error(w, "Empty body", http.StatusBadRequest)
+		return
+	}
+
+	contentType := http.DetectContentType(body)
+	if _, ok := posterExtForContentType(contentType); !ok {
+		http.Error(w, "Unsupported media type", http.StatusUnsupportedMediaType)
+		return
+	}
+
+	id, entry, err := s.posters.store(body, contentType, time.Now())
+	if err != nil {
+		log.Printf("posters: failed to store from %s: %v", clientIP(r), err)
+		http.Error(w, "Failed to store poster", http.StatusInternalServerError)
+		return
+	}
+
+	url := "/posters/" + entry.Filename
+	log.Printf("posters: stored %s (%d bytes) from %s", id, entry.Size, clientIP(r))
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"id":        id,
+		"url":       url,
+		"expiresIn": int(s.posters.maxAge.Seconds()),
+	})
+}
+
+func (s *Server) handleGetPosters(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	filename := strings.TrimPrefix(r.URL.Path, "/posters/")
+	entry, ok := s.posters.lookup(filename, time.Now())
+	if !ok {
+		http.Error(w, "Not found", http.StatusNotFound)
+		return
+	}
+
+	f, err := os.Open(s.posters.filePath(entry.Filename))
+	if err != nil {
+		http.Error(w, "Not found", http.StatusNotFound)
+		return
+	}
+	defer f.Close()
+
+	remaining := int(time.Until(entry.ExpiresAt).Seconds())
+	if remaining < 0 {
+		remaining = 0
+	}
+	w.Header().Set("Cache-Control", "public, max-age="+strconv.Itoa(remaining))
+	w.Header().Set("Content-Type", entry.ContentType)
+	w.Header().Set("Content-Length", strconv.FormatInt(entry.Size, 10))
+	http.ServeContent(w, r, entry.Filename, entry.CreatedAt, f)
+}
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	ip := clientIP(r)
 
@@ -836,6 +1187,17 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	var currentRoom *Room
 	var currentPeerID string
 	var isHost bool
+	rejectRoomTransition := func() bool {
+		if currentRoom == nil {
+			return false
+		}
+		client.sendJSON(serverMsg{
+			Type:    relayTypeError,
+			Code:    relayErrorAlreadyInRoom,
+			Message: "Leave the current room before creating or joining another",
+		})
+		return true
+	}
 
 	// Cleanup on disconnect — only if our Client is still the one in the room.
 	// A reconnecting peer reuses the same peerId, so the map entry may have
@@ -851,7 +1213,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			currentRoom.mu.Unlock()
 			if !stale {
 				currentRoom.broadcastExcept(currentPeerID, serverMsg{
-					Type:   "peerLeft",
+					Type:   relayTypePeerLeft,
 					PeerID: currentPeerID,
 				})
 				s.snap.schedule()
@@ -873,24 +1235,27 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if !rl.allow() {
-			client.sendJSON(serverMsg{Type: "error", Code: "rate_limited", Message: "Too many messages"})
+			client.sendJSON(serverMsg{Type: relayTypeError, Code: relayErrorRateLimited, Message: "Too many messages"})
 			continue
 		}
 
 		var msg clientMsg
 		if err := json.Unmarshal(raw, &msg); err != nil {
-			client.sendJSON(serverMsg{Type: "error", Code: "invalid_message", Message: "Invalid JSON"})
+			client.sendJSON(serverMsg{Type: relayTypeError, Code: relayErrorInvalidMessage, Message: "Invalid JSON"})
 			continue
 		}
 
 		switch msg.Type {
-		case "create":
-			if msg.SessionID == "" || msg.PeerID == "" {
-				client.sendJSON(serverMsg{Type: "error", Code: "invalid_message", Message: "sessionId and peerId required"})
+		case relayTypeCreate:
+			if !validRelayID(msg.SessionID, maxSessionIDLength) || !validRelayID(msg.PeerID, maxPeerIDLength) {
+				client.sendJSON(serverMsg{Type: relayTypeError, Code: relayErrorInvalidMessage, Message: "Invalid sessionId or peerId"})
+				continue
+			}
+			if rejectRoomTransition() {
 				continue
 			}
 			if !s.conns.tryCreateRoom(ip) {
-				client.sendJSON(serverMsg{Type: "error", Code: "rate_limited", Message: "Too many rooms created"})
+				client.sendJSON(serverMsg{Type: relayTypeError, Code: relayErrorRateLimited, Message: "Too many rooms created"})
 				continue
 			}
 			s.mu.Lock()
@@ -901,7 +1266,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 				if !empty {
 					s.mu.Unlock()
 					s.conns.releaseRoom(ip)
-					client.sendJSON(serverMsg{Type: "error", Code: "room_exists", Message: "Room already exists"})
+					client.sendJSON(serverMsg{Type: relayTypeError, Code: relayErrorRoomExists, Message: "Room already exists"})
 					continue
 				}
 				// Empty stale room — reclaim the ID
@@ -921,25 +1286,28 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			currentPeerID = msg.PeerID
 			isHost = true
 			log.Printf("room %s created by %s", msg.SessionID, msg.PeerID)
-			client.sendJSON(serverMsg{Type: "created", SessionID: msg.SessionID})
+			client.sendJSON(serverMsg{Type: relayTypeCreated, SessionID: msg.SessionID})
 			s.snap.schedule()
 
-		case "join":
-			if msg.SessionID == "" || msg.PeerID == "" {
-				client.sendJSON(serverMsg{Type: "error", Code: "invalid_message", Message: "sessionId and peerId required"})
+		case relayTypeJoin:
+			if !validRelayID(msg.SessionID, maxSessionIDLength) || !validRelayID(msg.PeerID, maxPeerIDLength) {
+				client.sendJSON(serverMsg{Type: relayTypeError, Code: relayErrorInvalidMessage, Message: "Invalid sessionId or peerId"})
+				continue
+			}
+			if rejectRoomTransition() {
 				continue
 			}
 			s.mu.RLock()
 			room, exists := s.rooms[msg.SessionID]
 			s.mu.RUnlock()
 			if !exists {
-				client.sendJSON(serverMsg{Type: "error", Code: "room_not_found", Message: "Room does not exist"})
+				client.sendJSON(serverMsg{Type: relayTypeError, Code: relayErrorRoomNotFound, Message: "Room does not exist"})
 				continue
 			}
 			room.mu.Lock()
 			if len(room.Peers) >= maxRoomSize {
 				room.mu.Unlock()
-				client.sendJSON(serverMsg{Type: "error", Code: "room_full", Message: "Room is full"})
+				client.sendJSON(serverMsg{Type: relayTypeError, Code: relayErrorRoomFull, Message: "Room is full"})
 				continue
 			}
 			room.Peers[msg.PeerID] = client
@@ -957,43 +1325,43 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 					existingPeers = append(existingPeers, p)
 				}
 			}
-			client.sendJSON(serverMsg{Type: "joined", SessionID: msg.SessionID, Peers: existingPeers})
-			room.broadcastExcept(msg.PeerID, serverMsg{Type: "peerJoined", PeerID: msg.PeerID})
+			client.sendJSON(serverMsg{Type: relayTypeJoined, SessionID: msg.SessionID, Peers: existingPeers})
+			room.broadcastExcept(msg.PeerID, serverMsg{Type: relayTypePeerJoined, PeerID: msg.PeerID})
 			s.snap.schedule()
 
-		case "broadcast":
+		case relayTypeBroadcast:
 			if currentRoom == nil {
-				client.sendJSON(serverMsg{Type: "error", Code: "not_in_room", Message: "Not in a room"})
+				client.sendJSON(serverMsg{Type: relayTypeError, Code: relayErrorNotInRoom, Message: "Not in a room"})
 				continue
 			}
 			currentRoom.broadcastExcept(currentPeerID, serverMsg{
-				Type:    "message",
+				Type:    relayTypeMessage,
 				From:    currentPeerID,
 				Payload: msg.Payload,
 			})
 
-		case "sendTo":
+		case relayTypeSendTo:
 			if currentRoom == nil {
-				client.sendJSON(serverMsg{Type: "error", Code: "not_in_room", Message: "Not in a room"})
+				client.sendJSON(serverMsg{Type: relayTypeError, Code: relayErrorNotInRoom, Message: "Not in a room"})
 				continue
 			}
-			if msg.To == "" {
-				client.sendJSON(serverMsg{Type: "error", Code: "invalid_message", Message: "to field required"})
+			if !validRelayID(msg.To, maxPeerIDLength) {
+				client.sendJSON(serverMsg{Type: relayTypeError, Code: relayErrorInvalidMessage, Message: "Invalid to field"})
 				continue
 			}
 			if !currentRoom.sendTo(msg.To, serverMsg{
-				Type:    "message",
+				Type:    relayTypeMessage,
 				From:    currentPeerID,
 				Payload: msg.Payload,
 			}) {
-				client.sendJSON(serverMsg{Type: "error", Code: "not_in_room", Message: "Target peer not found"})
+				client.sendJSON(serverMsg{Type: relayTypeError, Code: relayErrorNotInRoom, Message: "Target peer not found"})
 			}
 
-		case "ping":
-			client.sendJSON(serverMsg{Type: "pong"})
+		case relayTypePing:
+			client.sendJSON(serverMsg{Type: relayTypePong})
 
 		default:
-			client.sendJSON(serverMsg{Type: "error", Code: "invalid_message", Message: "Unknown message type"})
+			client.sendJSON(serverMsg{Type: relayTypeError, Code: relayErrorInvalidMessage, Message: "Unknown message type"})
 		}
 	}
 }
@@ -1001,10 +1369,11 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 func main() {
 	addr := flag.String("addr", ":8080", "Listen address")
 	logDir := flag.String("log-dir", "/data/logs", "Directory for log file storage")
+	posterDir := flag.String("poster-dir", "/data/posters", "Directory for Discord poster storage")
 	stateFile := flag.String("state-file", "/data/rooms.json", "Path to room snapshot file")
 	flag.Parse()
 
-	srv := newServer(*logDir, *stateFile)
+	srv := newServer(*logDir, *stateFile, *posterDir)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/relay", srv.handleWS)
@@ -1014,6 +1383,8 @@ func main() {
 	})
 	mux.HandleFunc("/logs", srv.handlePostLogs)
 	mux.HandleFunc("/logs/", srv.handleGetLogs)
+	mux.HandleFunc("/posters", srv.handlePostPosters)
+	mux.HandleFunc("/posters/", srv.handleGetPosters)
 	registerOAuthRoutes(mux, srv.oauth)
 
 	httpSrv := &http.Server{Addr: *addr, Handler: mux}

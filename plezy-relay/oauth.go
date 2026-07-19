@@ -1,6 +1,3 @@
-// Originally from https://github.com/edde746/plezy/tree/main/server (GPL-3.0)
-// 2026-04-24
-
 package main
 
 // OAuth proxy: relays MAL + AniList authorization-code flows for devices that
@@ -425,11 +422,7 @@ func (p *oauthProxy) cleanup() {
 	p.mu.Unlock()
 
 	p.ipMu.Lock()
-	for ip, rl := range p.ipRate {
-		if rl.stale(now) {
-			delete(p.ipRate, ip)
-		}
-	}
+	cleanupRateLimiters(p.ipRate, now, nil)
 	p.ipMu.Unlock()
 }
 
