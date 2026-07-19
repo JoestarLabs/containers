@@ -73,6 +73,8 @@ jobs:
           platforms: ${{ matrix.platform }}
           push: true
           tags: ghcr.io/${{ env.OWNER_LOWER }}/caddy-docker-cloudflare:sha-${{ github.sha }}-${{ matrix.arch }}
+          provenance: false
+          sbom: false
           cache-from: type=gha,scope=caddy-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=caddy-${{ matrix.arch }}
 
@@ -146,6 +148,8 @@ jobs:
           platforms: ${{ matrix.platform }}
           push: true
           tags: ghcr.io/${{ env.OWNER_LOWER }}/plezy-relay:sha-${{ github.sha }}-${{ matrix.arch }}
+          provenance: false
+          sbom: false
           cache-from: type=gha,scope=plezy-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=plezy-${{ matrix.arch }}
 
