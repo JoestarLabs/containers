@@ -23,6 +23,7 @@ jobs:
           curl -sO https://raw.githubusercontent.com/edde746/plezy/main/server/oauth.go
           curl -sO https://raw.githubusercontent.com/edde746/plezy/main/server/rate_limit.go
           curl -sO https://raw.githubusercontent.com/edde746/plezy/main/server/relay_protocol_gen.go
+          curl -sO https://raw.githubusercontent.com/edde746/plezy/main/server/client_ip.go
           curl -sO https://raw.githubusercontent.com/edde746/plezy/main/server/go.mod
           curl -sO https://raw.githubusercontent.com/edde746/plezy/main/server/go.sum
           
