@@ -1,0 +1,19 @@
+name: Build and Push OG Relay
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'og-relay/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  run-build:
+    uses: ./.github/workflows/reusable-build.yaml
+    with:
+      image_name: og-relay
+      context_path: ./og-relay
