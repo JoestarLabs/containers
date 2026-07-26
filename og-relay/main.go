@@ -141,6 +141,9 @@ func main() {
 			host = "Service"
 		}
 
+		ua := r.Header.Get("User-Agent")
+		log.Printf("[OG-Relay] Host: %s | Path: %s | User-Agent: %s", host, r.URL.Path, ua)
+
 		uri := r.Header.Get("X-Forwarded-Uri")
 		if uri == "" {
 			uri = r.URL.RequestURI()
