@@ -7,7 +7,7 @@ COPY main.go ./
 
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /og-relay main.go
 
-FROM alpine:3.21
+FROM alpine:3.24
 
 RUN apk add --no-cache ca-certificates tzdata
 
