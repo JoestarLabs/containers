@@ -6,12 +6,16 @@
   "packageRules": [
     {
       "description": "Group all caddy-docker-cloudflare updates together",
-      "matchPaths": ["caddy-docker-cloudflare/**"],
+      "matchFileNames": [
+        "caddy-docker-cloudflare/**"
+      ],
       "groupName": "Caddy Image Dependencies"
     },
     {
       "description": "Group all plezy-relay updates (Go modules and Docker base image) together",
-      "matchPaths": ["plezy-relay/**"],
+      "matchFileNames": [
+        "plezy-relay/**"
+      ],
       "groupName": "Plezy Relay Dependencies"
     },
     {
