@@ -1,6 +1,6 @@
 # Update the readable tag, index digest, and platforms together using the controlled process in CONTRIBUTING.md.
 # Platforms: linux/amd64, linux/arm64
-FROM golang:1.26.6-alpine3.23@sha256:2afa8bf41eb4c6b113ad1601739dbf755c9d19715049ae11db2dd2715e83438f AS build
+FROM golang:1.27.0-alpine3.23@sha256:3747dcba41c8b0db3211fda4db61638b980e17ac5bb3c94460a975a9cfe19395 AS build
 # Set by Docker Buildx automatically
 ARG TARGETOS
 ARG TARGETARCH
