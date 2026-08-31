@@ -32,15 +32,52 @@ jobs:
           fi
           mv Dockerfile.temp Dockerfile
 
+      - name: Build PR Body
+        id: pr_body
+        run: |
+          # Read the upstream SHA we last synced from (stored in tracking file committed alongside source)
+          SINCE_SHA=""
+          if [ -f plezy-relay/.upstream-sha ]; then
+            SINCE_SHA=$(cat plezy-relay/.upstream-sha)
+          fi
+
+          # Fetch commits touching server/ and list only those newer than our last-synced SHA
+          RAW=$(curl -s "https://api.github.com/repos/edde746/plezy/commits?path=server&per_page=20")
+          if [ -n "$SINCE_SHA" ]; then
+            COMMITS=$(echo "$RAW" | jq -r --arg s "$SINCE_SHA" \
+              '(map(.sha) | index($s)) as $i | .[:($i // length)] | .[] | "- " + (.commit.message | split("\n")[0])' \
+              2>/dev/null || true)
+          fi
+
+          # Fallback: just show the last 5 subjects touching server/
+          if [ -z "$COMMITS" ]; then
+            COMMITS=$(echo "$RAW" | jq -r '.[0:5][] | "- " + (.commit.message | split("\n")[0])')
+          fi
+
+          # Persist latest upstream SHA so the next sync knows where to diff from
+          LATEST_SHA=$(echo "$RAW" | jq -r '.[0].sha')
+          echo "$LATEST_SHA" > plezy-relay/.upstream-sha
+
+          # Write body (multiline-safe via heredoc output)
+          {
+            echo "Automatically synchronized \`plezy-relay\` Go source files and Dockerfile with the upstream repository \`edde746/plezy\`."
+            echo ""
+            echo "**Upstream commits (server/) since last sync:**"
+            echo "$COMMITS"
+            echo ""
+            echo "Merging this PR will trigger the multi-arch build and push workflow."
+          } > /tmp/pr_body.md
+
+          echo "body<<EOF" >> "$GITHUB_OUTPUT"
+          cat /tmp/pr_body.md >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
       - name: Create Pull Request
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           commit-message: "chore(deps): sync plezy-relay files with upstream"
           title: "chore(deps): sync plezy-relay with upstream"
-          body: |
-            Automatically synchronized `plezy-relay` Go source files and Dockerfile with the upstream repository `edde746/plezy`.
-            
-            Merging this PR will trigger the multi-arch build and push workflow.
+          body: ${{ steps.pr_body.outputs.body }}
           branch: sync-plezy-upstream
           delete-branch: true
