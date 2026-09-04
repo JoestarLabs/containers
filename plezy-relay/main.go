@@ -28,48 +28,57 @@ import (
 )
 
 const (
-	rateBurst                  = 30
-	rateSustained              = 10
-	cleanupInterval            = 5 * time.Minute
-	emptyRoomMaxAge            = 5 * time.Minute
-	peerReservationGrace       = emptyRoomMaxAge
-	roomMaxAge                 = 24 * time.Hour
-	writeWait                  = 10 * time.Second
-	httpResponseWriteMargin    = 10 * time.Second
-	httpResponseWriteTimeout   = oauthResultWait + httpResponseWriteMargin
-	pongWait                   = 60 * time.Second
-	pingInterval               = 30 * time.Second
-	maxLogSize                 = 1 * 1024 * 1024
-	logMaxAge                  = 3 * 24 * time.Hour
-	logIDLength                = 5
-	logRateInterval            = 1 * time.Minute
-	logLookupRateBurst         = 10
-	logLookupRateSustained     = 1
-	maxLogEntries              = 500
-	maxFailedLogLookupSources  = 4096
-	maxConcurrentLogLookups    = 32
-	maxHTTPHeaderBytes         = 64 * 1024
-	maxPosterSize              = 5 * 1024 * 1024
-	maxPosterStoreSize         = int64(1 * 1024 * 1024 * 1024)
-	posterMaxAge               = 3 * time.Hour
-	posterIDLength             = 16
-	posterPerIPRateBurst       = 3
-	posterPerIPRateSustained   = 1
-	posterGlobalRateBurst      = 8
-	posterGlobalRateSustained  = 2
-	maxConcurrentPosterUploads = 4
-	posterUploadReadTimeout    = 30 * time.Second
-	maxConnsPerIP              = 5
-	maxGlobalConns             = 100
-	maxRoomsPerIP              = 3
-	maxRetainedRooms           = 2000
-	connRateBurst              = 5
-	connRateSustained          = 1
-	reconnectTokenSize         = 32
-	snapshotFormatVersion      = 4
-	snapshotDebounce           = 100 * time.Millisecond
-	snapshotFlushTimeout       = 5 * time.Second
-	snapshotMaxFileSize        = 4 * 1024 * 1024
+	rateBurst                      = 30
+	rateSustained                  = 10
+	cleanupInterval                = 5 * time.Minute
+	emptyRoomMaxAge                = 5 * time.Minute
+	peerReservationGrace           = emptyRoomMaxAge
+	roomMaxAge                     = 24 * time.Hour
+	writeWait                      = 10 * time.Second
+	httpResponseWriteMargin        = 10 * time.Second
+	httpResponseWriteTimeout       = oauthResultWait + httpResponseWriteMargin
+	pongWait                       = 60 * time.Second
+	pingInterval                   = 30 * time.Second
+	maxLogSize                     = 1 * 1024 * 1024
+	logMaxAge                      = 3 * 24 * time.Hour
+	logIDLength                    = 5
+	logRateInterval                = 1 * time.Minute
+	logLookupRateBurst             = 10
+	logLookupRateSustained         = 1
+	maxLogEntries                  = 500
+	maxFailedLogLookupSources      = 4096
+	maxConcurrentLogLookups        = 32
+	maxHTTPHeaderBytes             = 64 * 1024
+	maxPosterSize                  = 5 * 1024 * 1024
+	maxPosterStoreSize             = int64(1 * 1024 * 1024 * 1024)
+	posterMaxAge                   = 3 * time.Hour
+	posterIDLength                 = 16
+	posterPerIPRateBurst           = 3
+	posterPerIPRateSustained       = 1
+	posterGlobalRateBurst          = 8
+	posterGlobalRateSustained      = 2
+	maxConcurrentPosterUploads     = 4
+	posterFetchPerIPRateBurst      = 20
+	posterFetchPerIPRateSustained  = 5
+	posterFetchGlobalRateBurst     = 100
+	posterFetchGlobalRateSustained = 25
+	maxConcurrentPosterFetches     = 16
+	// Per-IP concurrency caps sit well below the global caps for fairness:
+	// http.ServeContent holds a fetch slot for the whole response write, so
+	// without them one slow-reading client could occupy every slot.
+	maxConcurrentPosterUploadsPerIP = 2
+	maxConcurrentPosterFetchesPerIP = 4
+	posterUploadReadTimeout         = 30 * time.Second
+	maxConnsPerIP                   = 5
+	maxGlobalConns                  = 100
+	maxRoomsPerIP                   = 3
+	maxRetainedRooms                = 2000
+	connRateBurst                   = 5
+	connRateSustained               = 1
+	snapshotFormatVersion           = 4
+	snapshotDebounce                = 100 * time.Millisecond
+	snapshotFlushTimeout            = 5 * time.Second
+	snapshotMaxFileSize             = 4 * 1024 * 1024
 )
 
 var upgrader = websocket.Upgrader{
@@ -77,7 +86,6 @@ var upgrader = websocket.Upgrader{
 	WriteBufferSize: 1024,
 	CheckOrigin:     func(r *http.Request) bool { return true },
 }
-
 
 type clientMsg struct {
 	Type            string          `json:"type"`
@@ -102,7 +110,6 @@ type serverMsg struct {
 	Message         string          `json:"message,omitempty"`
 	Payload         json.RawMessage `json:"payload,omitempty"`
 }
-
 
 type outboundFrame struct {
 	data    []byte
@@ -214,7 +221,6 @@ func (c *Client) close() {
 	})
 }
 
-
 type reconnectVerifier [sha256.Size]byte
 
 type peerReservation struct {
@@ -237,7 +243,6 @@ type Room struct {
 	CreatedAt        time.Time
 	LastActivityAt   time.Time
 }
-
 
 // Nanosecond timestamps preserve exact absence state; zero means connected.
 type peerReservationSnapshot struct {
@@ -411,7 +416,6 @@ func (r *Room) sendFrom(senderID string, sender *Client, targetID string, msg se
 	return directedTargetFound
 }
 
-
 const logFileExt = ".log"
 
 var errLogStoreFull = errors.New("log store full")
@@ -512,7 +516,6 @@ func (ls *logStore) cleanup(now time.Time) error {
 	cleanupRateLimiters(ls.failedLookupRate, now, nil)
 	return removalErr
 }
-
 
 var errPosterStoreFull = errors.New("poster store full")
 
@@ -638,7 +641,6 @@ func (ps *posterStore) lookup(filename string, now time.Time) (artifactEntry, bo
 		return entry.Filename == filename
 	})
 }
-
 
 var errSnapshotterStopped = errors.New("snapshot writer is stopped")
 
@@ -1083,6 +1085,7 @@ type Server struct {
 	logs                   *logStore
 	posters                *posterStore
 	posterUploads          *posterUploadLimiter
+	posterFetches          *posterUploadLimiter
 	logLookups             chan struct{}
 	posterBodyReadTimeout  time.Duration
 	conns                  *connTracker
@@ -1101,7 +1104,8 @@ func newServer(logDir, stateFile, posterDir string, clientIPs clientIPResolver) 
 		rooms:                 make(map[string]*Room),
 		logs:                  newLogStore(logDir),
 		posters:               newPosterStore(posterDir, maxPosterStoreSize, posterMaxAge),
-		posterUploads:         newPosterUploadLimiter(posterPerIPRateBurst, posterPerIPRateSustained, posterGlobalRateBurst, posterGlobalRateSustained, maxConcurrentPosterUploads, time.Now()),
+		posterUploads:         newPosterUploadLimiter(posterPerIPRateBurst, posterPerIPRateSustained, posterGlobalRateBurst, posterGlobalRateSustained, maxConcurrentPosterUploads, maxConcurrentPosterUploadsPerIP, time.Now()),
+		posterFetches:         newPosterUploadLimiter(posterFetchPerIPRateBurst, posterFetchPerIPRateSustained, posterFetchGlobalRateBurst, posterFetchGlobalRateSustained, maxConcurrentPosterFetches, maxConcurrentPosterFetchesPerIP, time.Now()),
 		logLookups:            make(chan struct{}, maxConcurrentLogLookups),
 		posterBodyReadTimeout: posterUploadReadTimeout,
 		conns:                 newConnTracker(),
@@ -1246,7 +1250,7 @@ func (s *Server) loadSnapshot(path string) (bool, error) {
 			skipped++
 			continue
 		}
-		if r.ProtocolVersion != legacyRelayProtocolVersion && r.ProtocolVersion != relayProtocolVersion {
+		if !supportedRelayProtocolVersion(r.ProtocolVersion) {
 			skipped++
 			continue
 		}
@@ -1399,6 +1403,7 @@ func (s *Server) runCleanupStep(now time.Time) {
 		s.logRemovalError("posters", "cleanup", err)
 	}
 	s.posterUploads.cleanup(now)
+	s.posterFetches.cleanup(now)
 	s.conns.cleanup(now)
 	if s.oauth != nil {
 		s.oauth.cleanup()
@@ -1572,7 +1577,7 @@ func (s *Server) handlePostPosters(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Too many poster uploads", http.StatusTooManyRequests)
 		return
 	}
-	defer s.posterUploads.finish()
+	defer s.posterUploads.finish(ip)
 
 	timeout := s.posterBodyReadTimeout
 	if timeout <= 0 {
@@ -1635,6 +1640,17 @@ func (s *Server) handleGetPosters(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+
+	ip, err := s.clientIPs.resolve(r)
+	if err != nil {
+		http.Error(w, "Invalid client address", http.StatusBadRequest)
+		return
+	}
+	if !s.posterFetches.tryStart(ip, time.Now()) {
+		http.Error(w, "Too many poster requests", http.StatusTooManyRequests)
+		return
+	}
+	defer s.posterFetches.finish(ip)
 
 	filename := strings.TrimPrefix(r.URL.Path, "/posters/")
 	entry, ok, err := s.posters.lookup(filename, time.Now())
@@ -1767,7 +1783,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 				client.sendJSON(serverMsg{Type: relayTypeError, Code: relayErrorInvalidMessage, Message: "Invalid sessionId or peerId"})
 				continue
 			}
-			if msg.ProtocolVersion != legacyRelayProtocolVersion && msg.ProtocolVersion != relayProtocolVersion {
+			if !supportedRelayProtocolVersion(msg.ProtocolVersion) {
 				client.sendJSON(serverMsg{
 					Type:            relayTypeError,
 					Code:            relayErrorProtocolMismatch,
@@ -1913,7 +1929,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 				client.sendJSON(serverMsg{Type: relayTypeError, Code: relayErrorInvalidMessage, Message: "Invalid sessionId or peerId"})
 				continue
 			}
-			if msg.ProtocolVersion != legacyRelayProtocolVersion && msg.ProtocolVersion != relayProtocolVersion {
+			if !supportedRelayProtocolVersion(msg.ProtocolVersion) {
 				client.sendJSON(serverMsg{
 					Type:            relayTypeError,
 					Code:            relayErrorProtocolMismatch,
@@ -2259,6 +2275,80 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			currentPeerID = ""
 			for _, guest := range guests {
 				guest.close()
+			}
+
+		case relayTypeTransferHost:
+			if currentRoom == nil {
+				client.sendJSON(serverMsg{Type: relayTypeError, Code: relayErrorNotInRoom, Message: "Not in a room"})
+				continue
+			}
+			room := currentRoom
+			room.mu.Lock()
+			authorized :=
+				!room.closing &&
+					room.Peers[currentPeerID] == client &&
+					msg.ProtocolVersion == room.ProtocolVersion
+			if !authorized {
+				room.mu.Unlock()
+				client.sendJSON(serverMsg{Type: relayTypeError, Code: relayErrorPeerIdUnavailable, Message: "Unable to transfer host authority"})
+				continue
+			}
+			if currentPeerID != room.HostPeerID {
+				room.mu.Unlock()
+				client.sendJSON(serverMsg{Type: relayTypeError, Code: relayErrorNotHost, Message: "Only the host can transfer host authority"})
+				continue
+			}
+			if room.ProtocolVersion != relayProtocolVersion {
+				room.mu.Unlock()
+				client.sendJSON(serverMsg{Type: relayTypeError, Code: relayErrorInvalidMessage, Message: "Host transfer requires current protocol"})
+				continue
+			}
+			targetPeerID := msg.To
+			targetConnected := false
+			if validRelayID(targetPeerID, maxPeerIDLength) && targetPeerID != currentPeerID {
+				_, targetConnected = room.Peers[targetPeerID]
+			}
+			if !targetConnected {
+				room.mu.Unlock()
+				client.sendJSON(serverMsg{Type: relayTypeError, Code: relayErrorPeerNotFound, Message: "Target peer not found"})
+				continue
+			}
+			targetReservation, targetReserved := room.peerReservations[targetPeerID]
+			if !targetReserved || targetReservation.releasePending {
+				room.mu.Unlock()
+				if !targetReserved {
+					// Connected modern-room guests always hold a reservation.
+					log.Printf("transferHost: connected guest missing reservation")
+				}
+				client.sendJSON(serverMsg{Type: relayTypeError, Code: relayErrorPeerNotFound, Message: "Target peer not found"})
+				continue
+			}
+
+			// Swap authority. The host never holds a peer reservation (snapshot
+			// loading rejects that), so the target's reservation becomes the
+			// host verifier and the old host gains a connected reservation.
+			// Reconnect tokens are untouched: both peers keep their own.
+			oldHostPeerID := currentPeerID
+			delete(room.peerReservations, targetPeerID)
+			room.peerReservations[oldHostPeerID] = peerReservation{verifier: room.hostVerifier}
+			room.hostVerifier = targetReservation.verifier
+			room.HostPeerID = targetPeerID
+			room.LastActivityAt = time.Now()
+			recipients := make([]*Client, 0, len(room.Peers))
+			for _, peerClient := range room.Peers {
+				recipients = append(recipients, peerClient)
+			}
+			hostChanged := serverMsg{
+				Type:       relayTypeHostChanged,
+				SessionID:  room.SessionID,
+				HostPeerID: targetPeerID,
+				From:       oldHostPeerID,
+			}
+			s.snap.recordMutation()
+			room.mu.Unlock()
+
+			for _, peerClient := range recipients {
+				peerClient.sendJSON(hostChanged)
 			}
 
 		case relayTypeBroadcast:
