@@ -10,7 +10,7 @@ Custom container images built and maintained by **JoestarLabs**, published to Gi
 ## Image Registry
 
 ### caddy-docker-cloudflare (`ghcr.io/joestarlabs/caddy-docker-cloudflare:latest`)
-- Custom Caddy with: `caddy-docker-proxy`, `cloudflare-dns`, `maxmind-geolocation`.
+Custom Caddy with: `caddy-docker-proxy`, `cloudflare-dns`, `maxmind-geolocation`.
 
 <details>
 <summary>Docker Compose Example</summary>
@@ -46,7 +46,7 @@ volumes:
 </details>
 
 ### plezy-relay (`ghcr.io/joestarlabs/plezy-relay:latest`)
-- Lightweight Go media status proxy, derived from [edde746/plezy/server](https://github.com/edde746/plezy/tree/main/server).
+Lightweight Go media status proxy, derived from [edde746/plezy/server](https://github.com/edde746/plezy/tree/main/server).
 
 <details>
 <summary>Docker Compose Example</summary>
@@ -75,7 +75,7 @@ volumes:
 </details>
 
 ### og-relay (`ghcr.io/joestarlabs/og-relay:latest`)
-- Lightweight Go server serving Open Graph link preview metadata and dynamic card images for Authentik-protected domains.
+Lightweight Go server serving Open Graph link preview metadata and dynamic card images for Authentik-protected domains.
 
 <details>
 <summary>Docker Compose Example</summary>
