@@ -34,6 +34,8 @@ jobs:
 
       - name: Build PR Body
         id: pr_body
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           # Read the upstream SHA we last synced from (stored in tracking file committed alongside source)
           SINCE_SHA=""
@@ -42,7 +44,7 @@ jobs:
           fi
 
           # Fetch commits touching server/ and list only those newer than our last-synced SHA
-          RAW=$(curl -s "https://api.github.com/repos/edde746/plezy/commits?path=server&per_page=20")
+          RAW=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" "https://api.github.com/repos/edde746/plezy/commits?path=server&per_page=20")
           if [ -n "$SINCE_SHA" ]; then
             COMMITS=$(echo "$RAW" | jq -r --arg s "$SINCE_SHA" \
               '(map(.sha) | index($s)) as $i | .[:($i // length)] | .[] | "- " + (.commit.message | split("\n")[0])' \
