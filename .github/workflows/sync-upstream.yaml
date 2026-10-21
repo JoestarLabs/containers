@@ -1,8 +1,8 @@
 name: Sync Plezy Upstream
 
 on:
-  schedule:
-    - cron: '47 3 * * *' # Runs daily at 3:47 AM UTC (uneven time to avoid queue delays)
+  # schedule:
+  #   - cron: '47 3 * * *' # Sunset: Plezy switched to Open Watch Party
   workflow_dispatch: # Allows manual trigger from the GitHub Actions UI
 
 permissions:

@@ -12,15 +12,17 @@
       "groupName": "Caddy Image Dependencies"
     },
     {
-      "description": "Group all plezy-relay updates (Go modules and Docker base image) together",
+      "description": "Disable dependency updates for sunset plezy-relay",
       "matchFileNames": [
         "plezy-relay/**"
       ],
-      "groupName": "Plezy Relay Dependencies"
+      "enabled": false
     },
     {
       "description": "Group all GitHub Actions workflow updates together",
-      "matchManagers": ["github-actions"],
+      "matchManagers": [
+        "github-actions"
+      ],
       "groupName": "GitHub Actions Dependencies"
     }
   ]

@@ -46,6 +46,8 @@ volumes:
 </details>
 
 ### plezy-relay (`ghcr.io/joestarlabs/plezy-relay:latest`)
+> **Deprecated**: Plezy now uses Open Watch Party. Use official [`ghcr.io/edde746/owp-relay:1`](https://github.com/edde746/openwatchparty) instead.
+
 Lightweight Go media status proxy, derived from [edde746/plezy/server](https://github.com/edde746/plezy/tree/main/server).
 
 <details>
